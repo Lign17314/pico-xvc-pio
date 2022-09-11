@@ -19,13 +19,20 @@ else()
 
     #add_subdirectory(iperf)
     #add_subdirectory(ping)
-    pico_enable_stdio_usb(test 1)
-    pico_enable_stdio_uart(test 0)
+    pico_enable_stdio_usb(test 0)
+    pico_enable_stdio_uart(test 1)
 
     target_compile_definitions(test PRIVATE
     NO_SYS=0            # don't want NO_SYS (generally this would be in your lwipopts.h)
     LWIP_SOCKET=1
     LWIP_PROVIDE_ERRNO=1
+    #LWIP_NETCONN=1         
+    #LWIP_NETIF_API=1  
+    LWIP_IPV4=1 
+    #LWIP_TCP=1
+    DEFAULT_TCP_RECVMBOX_SIZE=12   
+    DEFAULT_ACCEPTMBOX_SIZE=12
+    #TCPIP_THREAD_PRIO=9
     #LIB_CMSIS_CORE =1
     )
     target_include_directories(test PUBLIC

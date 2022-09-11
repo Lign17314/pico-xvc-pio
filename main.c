@@ -88,8 +88,8 @@ StaticTask_t usb_device_taskdef;
 
 // static task for hid
 #define HID_STACK_SZIE configMINIMAL_STACK_SIZE
-StackType_t hid_stack[HID_STACK_SZIE];
-StaticTask_t hid_taskdef;
+TaskHandle_t hid_stack[HID_STACK_SZIE];
+TaskHandle_t hid_taskdef;
 
 void led_blinky_cb(TimerHandle_t xTimer);
 void usb_device_task(void *param);
@@ -171,15 +171,12 @@ static err_t netif_init_cb(struct netif *netif)
 
 static void init_lwip(void)
 {
-  struct netif *netif = &netif_data;
-
   lwip_init();
-
+  struct netif *netif = &netif_data;
   /* the lwip virtual MAC address must be different from the host's; to ensure this, we toggle the LSbit */
   netif->hwaddr_len = sizeof(tud_network_mac_address);
   memcpy(netif->hwaddr, tud_network_mac_address, sizeof(tud_network_mac_address));
   netif->hwaddr[5] ^= 0x01;
-
   netif = netif_add(netif, &ipaddr, &netmask, &gateway, NULL, netif_init_cb, ip_input);
   netif_set_default(netif);
 }
@@ -251,26 +248,6 @@ void tud_network_init_cb(void)
     received_frame = NULL;
   }
 }
-#include "lwip/netif.h"
-#include "lwip/ip4_addr.h"
-#include "lwip/apps/lwiperf.h"
-// Report IP results and exit
-static void iperf_report(void *arg, enum lwiperf_report_type report_type,
-                         const ip_addr_t *local_addr, u16_t local_port, const ip_addr_t *remote_addr, u16_t remote_port,
-                         u32_t bytes_transferred, u32_t ms_duration, u32_t bandwidth_kbitpsec)
-{
-  static uint32_t total_iperf_megabytes = 0;
-  uint32_t mbytes = bytes_transferred / 1024 / 1024;
-  float mbits = bandwidth_kbitpsec / 1000.0;
-
-  total_iperf_megabytes += mbytes;
-
-  printf("Completed iperf transfer of %d MBytes @ %.1f Mbits/sec\n", mbytes, mbits);
-  printf("Total iperf megabytes since start %d Mbytes\n", total_iperf_megabytes);
-#if CYW43_USE_STATS
-  printf("packets in %u packets out %u\n", CYW43_STAT_GET(PACKET_IN_COUNT), CYW43_STAT_GET(PACKET_OUT_COUNT));
-#endif
-}
 
 //--------------------------------------------------------------------+
 // Main
@@ -279,15 +256,18 @@ static void iperf_report(void *arg, enum lwiperf_report_type report_type,
 int main(void)
 {
   board_init();
+  printf("app start\n");
+
   // soft timer for blinky
-  blinky_tm = xTimerCreateStatic(NULL, pdMS_TO_TICKS(BLINK_NOT_MOUNTED), true, NULL, led_blinky_cb, &blinky_tmdef);
+  blinky_tm = xTimerCreate(NULL, pdMS_TO_TICKS(BLINK_NOT_MOUNTED), true, NULL, led_blinky_cb);
   xTimerStart(blinky_tm, 0);
-
+  TaskHandle_t rtos_task;
+  TaskHandle_t rtos_task1;
   // Create a task for tinyusb device stack
-  (void)xTaskCreateStatic(usb_device_task, "usbd", USBD_STACK_SIZE, NULL, configMAX_PRIORITIES - 1, usb_device_stack, &usb_device_taskdef);
-
-  // Create HID task
-  (void)xTaskCreateStatic(hid_task, "hid", HID_STACK_SZIE, NULL, configMAX_PRIORITIES - 2, hid_stack, &hid_taskdef);
+  (void)xTaskCreate(usb_device_task, "usbd", USBD_STACK_SIZE, NULL, 1, &usb_device_taskdef);
+  // xTaskCreate()
+  //  Create HID task
+  (void)xTaskCreate(hid_task, "hid", HID_STACK_SZIE, NULL, 1, &hid_taskdef);
 
   // skip starting scheduler (and return) for ESP32-S2 or ESP32-S3
 #if !(TU_CHECK_MCU(ESP32S2) || TU_CHECK_MCU(ESP32S3))
@@ -303,6 +283,241 @@ void app_main(void)
   main();
 }
 #endif
+#include <fcntl.h>
+#include <sys/types.h>
+#include "lwip/sockets.h"
+int tcp_app()
+{
+  int i;
+  int s;
+  int c;
+  int port = 2542;
+  struct sockaddr_in address;
+  s = lwip_socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0)
+  {
+    perror("socket");
+    return 1;
+  }
+  i = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &i, sizeof i);
+  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_port = htons(port);
+  address.sin_family = AF_INET;
+  if (bind(s, (struct sockaddr *)&address, sizeof(address)) < 0)
+  {
+    perror("bind");
+    return 1;
+  }
+  printf("%s,%d\n", __func__, __LINE__);
+  if (listen(s, 1) < 0)
+  {
+    perror("listen");
+    return 1;
+  }
+
+  fd_set conn;
+  int maxfd = 0;
+  FD_ZERO(&conn);
+  FD_SET(s, &conn);
+  maxfd = s;
+  return 0;
+}
+int tcp_app_runloop()
+{
+  return 0;
+}
+static int sread(int fd, void *target, int len)
+{
+  unsigned char *t = target;
+  while (len)
+  {
+    int r = read(fd, t, len);
+    if (r <= 0)
+      return r;
+    t += r;
+    len -= r;
+  }
+  return 1;
+}
+
+int handle_data(int fd, void *ptr)
+{
+
+  const char xvcInfo[] = "xvcServer_v1.0:2048\n";
+
+  do
+  {
+    char cmd[16];
+    unsigned char buffer[8192], result[1024];
+    memset(cmd, 0, 16);
+
+    if (sread(fd, cmd, 2) != 1)
+      return 1;
+
+    if (memcmp(cmd, "ge", 2) == 0)
+    {
+      if (sread(fd, cmd, 6) != 1)
+        return 1;
+      memcpy(result, xvcInfo, strlen(xvcInfo));
+      if (write(fd, result, strlen(xvcInfo)) != strlen(xvcInfo))
+      {
+        perror("write");
+        return 1;
+      }
+      break;
+    }
+    else if (memcmp(cmd, "se", 2) == 0)
+    {
+      if (sread(fd, cmd, 9) != 1)
+        return 1;
+      memcpy(result, cmd + 5, 4);
+      if (write(fd, result, 4) != 4)
+      {
+        perror("write");
+        return 1;
+      }
+      break;
+    }
+    else if (memcmp(cmd, "sh", 2) == 0)
+    {
+      if (sread(fd, cmd, 4) != 1)
+        return 1;
+    }
+    else
+    {
+
+      fprintf(stderr, "invalid cmd '%s'\n", cmd);
+      return 1;
+    }
+    // shift 4 word | len 4 word | nr_bytes * 2 tms and tdi
+    int len;
+    if (sread(fd, &len, 4) != 1)
+    {
+      fprintf(stderr, "reading length failed\n");
+      return 1;
+    }
+
+    int nr_bytes = (len + 7) / 8;
+    if (nr_bytes * 2 > sizeof(buffer))
+    {
+      fprintf(stderr, "buffer size exceeded\n");
+      return 1;
+    }
+
+    if (sread(fd, buffer, nr_bytes * 2) != 1)
+    {
+      fprintf(stderr, "reading data failed\n");
+      return 1;
+    }
+    memset(result, 0, nr_bytes);
+
+    int bytesLeft = nr_bytes;
+    int bitsLeft = len;
+    int byteIndex = 0;
+    int tdi, tms, tdo;
+
+    while (bytesLeft > 0)
+    {
+      tms = 0;
+      tdi = 0;
+      tdo = 0;
+      if (bytesLeft >= 4)
+      {
+        memcpy(&tms, &buffer[byteIndex], 4);
+        memcpy(&tdi, &buffer[byteIndex + nr_bytes], 4);
+        /*
+        ptr->length_offset = 32;
+        dsb(st);
+        ptr->tms_offset = tms;
+        dsb(st);
+        ptr->tdi_offset = tdi;
+        dsb(st);
+        ptr->ctrl_offset = 0x01;
+        
+        while (ptr->ctrl_offset)
+        {
+        }
+
+        tdo = ptr->tdo_offset;
+        */
+            memcpy(&result[byteIndex], &tdo, 4);
+
+        bytesLeft -= 4;
+        bitsLeft -= 32;
+        byteIndex += 4;
+      }
+      else
+      {
+        memcpy(&tms, &buffer[byteIndex], bytesLeft);
+        memcpy(&tdi, &buffer[byteIndex + nr_bytes], bytesLeft);
+        /*
+                ptr->length_offset = bitsLeft;
+                dsb(st);
+                ptr->tms_offset = tms;
+                dsb(st);
+                ptr->tdi_offset = tdi;
+                dsb(st);
+                ptr->ctrl_offset = 0x01;
+                while (ptr->ctrl_offset)
+                {
+                }
+
+                tdo = ptr->tdo_offset;
+        */
+        memcpy(&result[byteIndex], &tdo, bytesLeft);
+
+        break;
+      }
+    }
+    if (write(fd, result, nr_bytes) != nr_bytes)
+    {
+      perror("write");
+      return 1;
+    }
+
+  } while (1);
+  /* Note: Need to fix JTAG state updates, until then no exit is allowed */
+  return 0;
+}
+
+/* This function initializes this lwIP test. When NO_SYS=1, this is done in
+ * the main_loop context (there is no other one), when NO_SYS=0, this is done
+ * in the tcpip_thread context */
+static void
+test_init(void *arg)
+{ /* remove compiler warning */
+#if NO_SYS
+  LWIP_UNUSED_ARG(arg);
+#else  /* NO_SYS */
+  sys_sem_t *init_sem;
+  LWIP_ASSERT("arg != NULL", arg != NULL);
+  init_sem = (sys_sem_t *)arg;
+#endif /* NO_SYS */
+
+  /* init randomizer again (seed per thread) */
+  srand((unsigned int)time(NULL));
+  printf("task %s,%d\n", __func__, __LINE__);
+  /* init network interfaces */
+  // test_netif_init();
+
+  struct netif *netif = &netif_data;
+  /* the lwip virtual MAC address must be different from the host's; to ensure this, we toggle the LSbit */
+  netif->hwaddr_len = sizeof(tud_network_mac_address);
+  memcpy(netif->hwaddr, tud_network_mac_address, sizeof(tud_network_mac_address));
+  netif->hwaddr[5] ^= 0x01;
+  netif = netif_add(netif, &ipaddr, &netmask, &gateway, NULL, netif_init_cb, ip_input);
+  netif_set_default(netif);
+
+  /* init apps */
+  // apps_init();
+
+#if !NO_SYS
+  printf("task %s,%d\n", __func__, __LINE__);
+  sys_sem_signal(init_sem);
+  printf("task %s,%d\n", __func__, __LINE__);
+#endif /* !NO_SYS */
+}
 
 // USB Device Driver task
 // This top level thread process all usb events and invoke callbacks
@@ -313,15 +528,7 @@ void usb_device_task(void *param)
   // This should be called after scheduler/kernel is started.
   // Otherwise it could cause kernel issue since USB IRQ handler does use RTOS queue API.
   tusb_init();
-  init_lwip();
-  while (!netif_is_up(&netif_data))
-    ;
-  while (dhserv_init(&dhcp_config) != ERR_OK)
-    ;
-  while (dnserv_init(&ipaddr, 53, dns_query_proc) != ERR_OK)
-    ;
-  // httpd_init();
-  lwiperf_start_tcp_server_default(&iperf_report, NULL);
+
   // RTOS forever loop
   while (1)
   {
@@ -366,6 +573,119 @@ void hid_task(void *param)
 {
   (void)param;
 
+  printf("%s,%d\n", __func__, __LINE__);
+  err_t err;
+  sys_sem_t init_sem;
+  err = sys_sem_new(&init_sem, 0);
+  tcpip_init(test_init, &init_sem);
+  /* we have to wait for initialization to finish before
+   * calling update_adapter()! */
+  sys_sem_wait(&init_sem);
+  sys_sem_free(&init_sem);
+
+  while (!netif_is_up(&netif_data))
+    ;
+  while (dhserv_init(&dhcp_config) != ERR_OK)
+    ;
+  while (dnserv_init(&ipaddr, 53, dns_query_proc) != ERR_OK)
+    ;
+
+  // tcp_app();
+
+  int i;
+  int s;
+  int c;
+  int port = 2542;
+  struct sockaddr_in address;
+  s = lwip_socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0)
+  {
+    perror("socket");
+    return 1;
+  }
+  i = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &i, sizeof i);
+  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_port = htons(port);
+  address.sin_family = AF_INET;
+  if (bind(s, (struct sockaddr *)&address, sizeof(address)) < 0)
+  {
+    perror("bind");
+    return 1;
+  }
+  printf("%s,%d\n", __func__, __LINE__);
+  if (listen(s, 1) < 0)
+  {
+    perror("listen");
+    return 1;
+  }
+
+  fd_set conn;
+  int maxfd = 0;
+  FD_ZERO(&conn);
+  FD_SET(s, &conn);
+  maxfd = s;
+  printf("%s,%d\n", __func__, __LINE__);
+  while (1)
+  {
+    fd_set read = conn, except = conn;
+    int fd;
+    if (select(maxfd + 1, &read, 0, &except, 0) < 0)
+    {
+      perror("select");
+      break;
+    }
+    for (fd = 0; fd <= maxfd; ++fd)
+    {
+      if (FD_ISSET(fd, &read))
+      {
+        if (fd == s)
+        {
+          int newfd;
+          socklen_t nsize = sizeof(address);
+
+          newfd = accept(s, (struct sockaddr *)&address, &nsize);
+
+          //               if (verbose)
+          printf("connection accepted - fd %d\n", newfd);
+          if (newfd < 0)
+          {
+            perror("accept");
+          }
+          else
+          {
+            printf("setting TCP_NODELAY to 1\n");
+            int flag = 1;
+            int optResult = setsockopt(newfd,
+                                       IPPROTO_TCP,
+                                       TCP_NODELAY,
+                                       (char *)&flag,
+                                       sizeof(int));
+            if (optResult < 0)
+              perror("TCP_NODELAY error");
+            if (newfd > maxfd)
+            {
+              maxfd = newfd;
+            }
+            FD_SET(newfd, &conn);
+          }
+        }
+        else if (handle_data(fd, NULL))
+        {
+          close(fd);
+          FD_CLR(fd, &conn);
+        }
+      }
+      else if (FD_ISSET(fd, &except))
+      {
+        close(fd);
+        FD_CLR(fd, &conn);
+        if (fd == s)
+          break;
+      }
+    }
+  }
+
   while (1)
   {
     // Poll every 10ms
@@ -398,4 +718,5 @@ void led_blinky_cb(TimerHandle_t xTimer)
 
   board_led_write(led_state);
   led_state = 1 - led_state; // toggle
+  // printf("task led\n");
 }
