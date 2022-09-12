@@ -7,5 +7,5 @@ PIN | Number
 --|--
 PIN_SCK |2
 PIN_TDI |3
-TDO |4
+PIN_TDO |4
 PIN_TMS |5
