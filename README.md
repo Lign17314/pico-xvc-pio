@@ -9,3 +9,5 @@ PIN_SCK |2
 PIN_TDI |3
 PIN_TDO |4
 PIN_TMS |5
+For more information, see this website.
+https://whycan.com/p_82551.html#p82551
