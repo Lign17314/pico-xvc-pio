@@ -40,6 +40,7 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/apps/lwiperf.h"
 
+#include "pio_xfer.h"
 #if TU_CHECK_MCU(ESP32S2) || TU_CHECK_MCU(ESP32S3)
 // ESP-IDF need "freertos/" prefix in include path.
 // CFG_TUSB_OS_INC_PATH should be defined accordingly.
@@ -90,6 +91,7 @@ StaticTask_t usb_device_taskdef;
 #define HID_STACK_SZIE configMINIMAL_STACK_SIZE
 TaskHandle_t hid_stack[HID_STACK_SZIE];
 TaskHandle_t hid_taskdef;
+TaskHandle_t traffic_taskdef;
 
 void led_blinky_cb(TimerHandle_t xTimer);
 void usb_device_task(void *param);
@@ -137,7 +139,11 @@ static err_t linkoutput_fn(struct netif *netif, struct pbuf *p)
   {
     /* if TinyUSB isn't ready, we must signal back to lwip that there is nothing we can do */
     if (!tud_ready())
+    {
+      printf("%s,%d\n",__func__,__LINE__);
       return ERR_USE;
+    }
+      
 
     /* if the network driver can accept another packet, we make it happen */
     if (tud_network_can_xmit(p->tot_len))
@@ -169,17 +175,6 @@ static err_t netif_init_cb(struct netif *netif)
   return ERR_OK;
 }
 
-static void init_lwip(void)
-{
-  lwip_init();
-  struct netif *netif = &netif_data;
-  /* the lwip virtual MAC address must be different from the host's; to ensure this, we toggle the LSbit */
-  netif->hwaddr_len = sizeof(tud_network_mac_address);
-  memcpy(netif->hwaddr, tud_network_mac_address, sizeof(tud_network_mac_address));
-  netif->hwaddr[5] ^= 0x01;
-  netif = netif_add(netif, &ipaddr, &netmask, &gateway, NULL, netif_init_cb, ip_input);
-  netif_set_default(netif);
-}
 
 /* handle any DNS requests from dns-server */
 bool dns_query_proc(const char *name, ip_addr_t *addr)
@@ -197,17 +192,18 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
   /* this shouldn't happen, but if we get another packet before
   parsing the previous, we must signal our inability to accept it */
   if (received_frame)
+  {
+    printf("recv bug in usb recv_cb");
     return false;
+  }
 
   if (size)
   {
     struct pbuf *p = pbuf_alloc(PBUF_RAW, size, PBUF_POOL);
-
     if (p)
     {
       /* pbuf_alloc() has already initialized struct; all we need to do is copy the data */
       memcpy(p->payload, src, size);
-
       /* store away the pointer for service_traffic() to later handle */
       received_frame = p;
     }
@@ -252,7 +248,18 @@ void tud_network_init_cb(void)
 //--------------------------------------------------------------------+
 // Main
 //--------------------------------------------------------------------+
+void traffic_task(void *param)
+{
+while (1)
+{
+  service_traffic();
+}
 
+}
+// FreeRTOS includes
+#include "FreeRTOS.h"
+#include "timers.h"
+#include "semphr.h"
 int main(void)
 {
   board_init();
@@ -264,11 +271,11 @@ int main(void)
   TaskHandle_t rtos_task;
   TaskHandle_t rtos_task1;
   // Create a task for tinyusb device stack
-  (void)xTaskCreate(usb_device_task, "usbd", USBD_STACK_SIZE, NULL, 1, &usb_device_taskdef);
+  (void)xTaskCreate(usb_device_task, "usbd", USBD_STACK_SIZE, NULL, 0, &usb_device_taskdef);
   // xTaskCreate()
   //  Create HID task
-  (void)xTaskCreate(hid_task, "hid", HID_STACK_SZIE, NULL, 1, &hid_taskdef);
-
+  (void)xTaskCreate(hid_task, "hid", HID_STACK_SZIE, NULL, 5, &hid_taskdef);
+  //(void)xTaskCreate(traffic_task, "traffic_task", HID_STACK_SZIE, NULL, 0, &traffic_taskdef);
   // skip starting scheduler (and return) for ESP32-S2 or ESP32-S3
 #if !(TU_CHECK_MCU(ESP32S2) || TU_CHECK_MCU(ESP32S3))
   vTaskStartScheduler();
@@ -334,27 +341,27 @@ static int sread(int fd, void *target, int len)
   {
     int r = read(fd, t, len);
     if (r <= 0)
+    {
       return r;
+    }
+      
     t += r;
     len -= r;
   }
   return 1;
 }
-
+unsigned char buffer[2048 + 1024], result[1024 + 1024];
 int handle_data(int fd, void *ptr)
 {
 
   const char xvcInfo[] = "xvcServer_v1.0:2048\n";
-
   do
   {
     char cmd[16];
-    unsigned char buffer[8192], result[1024];
+    
     memset(cmd, 0, 16);
-
     if (sread(fd, cmd, 2) != 1)
       return 1;
-
     if (memcmp(cmd, "ge", 2) == 0)
     {
       if (sread(fd, cmd, 6) != 1)
@@ -386,8 +393,7 @@ int handle_data(int fd, void *ptr)
     }
     else
     {
-
-      fprintf(stderr, "invalid cmd '%s'\n", cmd);
+      fprintf(stderr, "invalid cmd '%x %x'\n", cmd[0], cmd[1]);
       return 1;
     }
     // shift 4 word | len 4 word | nr_bytes * 2 tms and tdi
@@ -404,19 +410,24 @@ int handle_data(int fd, void *ptr)
       fprintf(stderr, "buffer size exceeded\n");
       return 1;
     }
-
     if (sread(fd, buffer, nr_bytes * 2) != 1)
     {
       fprintf(stderr, "reading data failed\n");
       return 1;
     }
-    memset(result, 0, nr_bytes);
-
+    //memset(result, 0, nr_bytes);
     int bytesLeft = nr_bytes;
     int bitsLeft = len;
     int byteIndex = 0;
     int tdi, tms, tdo;
-
+    unsigned char *tms_ptr = malloc(nr_bytes + 8);
+    memcpy(tms_ptr, buffer + nr_bytes, nr_bytes);
+    unsigned char *tdi_ptr = malloc(nr_bytes + 8);
+    memcpy(tdi_ptr, buffer, nr_bytes);
+    pio_xfer_rw(tms_ptr, buffer, &result[byteIndex], len);
+    free(tms_ptr);
+    free(tdi_ptr);
+#if 0
     while (bytesLeft > 0)
     {
       tms = 0;
@@ -434,7 +445,7 @@ int handle_data(int fd, void *ptr)
         ptr->tdi_offset = tdi;
         dsb(st);
         ptr->ctrl_offset = 0x01;
-        
+
         while (ptr->ctrl_offset)
         {
         }
@@ -470,6 +481,7 @@ int handle_data(int fd, void *ptr)
         break;
       }
     }
+#endif
     if (write(fd, result, nr_bytes) != nr_bytes)
     {
       perror("write");
@@ -535,6 +547,7 @@ void usb_device_task(void *param)
     // tinyusb device task
     tud_task();
     service_traffic();
+    
   }
 }
 
@@ -572,7 +585,6 @@ void tud_resume_cb(void)
 void hid_task(void *param)
 {
   (void)param;
-
   printf("%s,%d\n", __func__, __LINE__);
   err_t err;
   sys_sem_t init_sem;
@@ -625,22 +637,27 @@ void hid_task(void *param)
   FD_ZERO(&conn);
   FD_SET(s, &conn);
   maxfd = s;
+  pio_xfer_init();
   printf("%s,%d\n", __func__, __LINE__);
   while (1)
   {
     fd_set read = conn, except = conn;
     int fd;
+    printf("%s,%d\n",__func__,__LINE__);
     if (select(maxfd + 1, &read, 0, &except, 0) < 0)
     {
+      printf("%s,%d\n",__func__,__LINE__);
       perror("select");
       break;
     }
     for (fd = 0; fd <= maxfd; ++fd)
     {
+      printf("%s,%d\n",__func__,__LINE__);
       if (FD_ISSET(fd, &read))
       {
         if (fd == s)
         {
+          printf("%s,%d\n",__func__,__LINE__);
           int newfd;
           socklen_t nsize = sizeof(address);
 
@@ -678,6 +695,7 @@ void hid_task(void *param)
       }
       else if (FD_ISSET(fd, &except))
       {
+        printf("%s,%d\n",__func__,__LINE__);
         close(fd);
         FD_CLR(fd, &conn);
         if (fd == s)

@@ -29,7 +29,7 @@
 #define LWIP_ICMP                   1
 #define LWIP_RAW                    1
 #define TCP_WND                     (8 * TCP_MSS)
-#define TCP_MSS                     1460
+#define TCP_MSS                     2048
 #define TCP_SND_BUF                 (8 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK  1
@@ -58,6 +58,9 @@
 #define LWIP_DEBUG                  1
 #define LWIP_STATS                  1
 #define LWIP_STATS_DISPLAY          1
+#endif
+#if !defined LWIP_DBG_MIN_LEVEL || defined __DOXYGEN__
+#define LWIP_DBG_MIN_LEVEL              LWIP_DBG_LEVEL_ALL
 #endif
 
 #define ETHARP_DEBUG                LWIP_DBG_ON

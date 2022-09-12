@@ -1,0 +1,67 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; These programs implement full-duplex SPI, with a SCK period of 4 clock
+; cycles. A different program is provided for each value of CPHA, and CPOL is
+; achieved using the hardware GPIO inversion available in the IO controls.
+;
+; Transmit-only SPI can go twice as fast -- see the ST7789 example!
+
+
+.program tdata
+.side_set 1 opt
+    ;;pull  ;pull 32bit to ose
+countloop:
+    ;irq 0 [1]
+    out pins, 1 side 0 [1] ; Stall here on empty (sideset proceeds even if
+    in pins, 1
+    nop  side 0 [2]
+    nop         side 1 [4] ; instruction stalls, so we stall with SCK low)
+    
+    nop         side 0 [1] 
+    jmp y-- countloop
+loop1:
+    jmp !x countloop
+loopblock:
+    out NULL,1
+    in NULL,1
+    jmp !OSRE loopblock
+
+
+% c-sdk {
+#include "hardware/gpio.h"
+static inline void pio_tdata_init(PIO pio, uint sm, uint prog_offs,float clkdiv, uint pin_sck, uint pin_tdi, uint pin_tdo) {
+    pio_sm_config c = tdata_program_get_default_config(prog_offs);
+    sm_config_set_out_pins(&c, pin_tdi, 1);
+    sm_config_set_in_pins(&c, pin_tdo);
+    sm_config_set_sideset_pins(&c, pin_sck);
+
+    // Only support MSB-first in this example code (shift to left, auto push/pull, threshold=nbits)
+    //auto push/pull not used for sync
+    sm_config_set_out_shift(&c, true, true, 32);
+    sm_config_set_in_shift(&c, true, true, 32);
+    
+    //sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    //sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    // MOSI, SCK output are low, MISO is input
+    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << pin_sck) | (1u << pin_tdi));
+    pio_sm_set_pindirs_with_mask(pio, sm, (1u << pin_sck) | (1u << pin_tdi), (1u << pin_sck) | (1u << pin_tdi) | (1u << pin_tdo));
+    pio_gpio_init(pio, pin_tdi); // output
+    pio_gpio_init(pio, pin_tdo);
+    pio_gpio_init(pio, pin_sck);
+
+    // The pin muxes can be configured to invert the output (among other things
+    // and this is a cheesy way to get CPOL=1
+    gpio_set_outover(pin_sck,  GPIO_OVERRIDE_NORMAL);
+    // SPI is synchronous, so bypass input synchroniser to reduce input delay.
+    hw_set_bits(&pio->input_sync_bypass, 1u << pin_tdo);
+
+    pio_sm_init(pio, sm, prog_offs, &c);
+    //pio_sm_set_enabled(pio, sm, true);
+}
+%}

@@ -39,7 +39,7 @@
  *
  * See http://www.freertos.org/a00110.html
  *----------------------------------------------------------*/
-
+#include "rp2040_config.h"
 /* Scheduler Related */
 #define configUSE_PREEMPTION                    1
 #define configUSE_TICKLESS_IDLE                 0
@@ -104,7 +104,7 @@
 
 #if FREE_RTOS_KERNEL_SMP // set by the RP2040 SMP port of FreeRTOS
 /* SMP port only */
-#define configNUM_CORES                         2
+#define configNUM_CORES                         1
 #define configTICK_CORE                         0
 #define configRUN_MULTIPLE_PRIORITIES           1
 #define configUSE_CORE_AFFINITY                 1
